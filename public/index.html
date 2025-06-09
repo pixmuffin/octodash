@@ -419,17 +419,32 @@
 						headers: {
 							"Content-Type": "application/json",
 						},
-						body: JSON.stringify({ apiKey, mpan, serialNumber, accountNumber }),
+						body: JSON.stringify({
+							apiKey,
+							mpan,
+							serialNumber,
+							accountNumber,
+						}),
 					});
 
-					if (response.ok) {
+					if (!response.ok) {
+						throw new Error("Failed to save credentials");
+					}
+
+					// Hide credentials form and show dashboard
+					document.getElementById("credentialsForm").style.display = "none";
+					document.getElementById("dashboard").style.display = "block";
+
+					// Start auto-update if checkbox is checked
+					if (document.getElementById("autoUpdate").checked) {
 						startAutoUpdate();
 					} else {
-						alert("Error saving credentials");
+						// If auto-update is not checked, still do an initial update
+						updateDashboard();
 					}
 				} catch (error) {
-					console.error("Error:", error);
-					alert("Error saving credentials");
+					console.error("Error saving credentials:", error);
+					alert("Error saving credentials: " + error.message);
 				}
 			}
 
