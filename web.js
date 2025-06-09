@@ -191,6 +191,7 @@ async function getTariffInfo(apiKey, accountNumber, mpan) {
 	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
 	console.log(`[${timestamp}] 💰 Fetching tariff information...`);
 	try {
+		// First get the account info to find the current tariff code
 		const accountRes = await axios.get(
 			`${octopusConfig.baseURL}/accounts/${accountNumber}/`,
 			{
@@ -201,39 +202,89 @@ async function getTariffInfo(apiKey, accountNumber, mpan) {
 				},
 			}
 		);
+
+		if (
+			!accountRes.data.properties ||
+			accountRes.data.properties.length === 0
+		) {
+			throw new Error("No properties found for account");
+		}
+
 		const properties = accountRes.data.properties;
 		const propertyWithMpan = properties.find((p) =>
 			p.electricity_meter_points.some((e) => e.mpan === mpan)
 		);
+
 		if (!propertyWithMpan) {
 			throw new Error(`MPAN ${mpan} not found in any property`);
 		}
+
 		const electricityPoints = propertyWithMpan.electricity_meter_points;
 		const mpanPoint = electricityPoints.find((e) => e.mpan === mpan);
+
+		if (
+			!mpanPoint ||
+			!mpanPoint.agreements ||
+			mpanPoint.agreements.length === 0
+		) {
+			throw new Error("No active agreements found for MPAN");
+		}
+
 		const currentAgreement = mpanPoint.agreements.reduce((latest, current) => {
 			if (!latest || new Date(current.valid_to) > new Date(latest.valid_to)) {
 				return current;
 			}
 			return latest;
 		}, null);
-		const tariffCode = currentAgreement.tariff_code;
 
+		if (!currentAgreement) {
+			throw new Error("No valid agreement found");
+		}
+
+		const tariffCode = currentAgreement.tariff_code;
+		console.log(`[${timestamp}] 📝 Found tariff code: ${tariffCode}`);
+
+		// Parse product code and region letter from tariff code
+		// Format: E-1R-<PRODUCT>-<REGION>
 		const tariffParts = tariffCode.split("-");
+		if (tariffParts.length < 4) {
+			throw new Error(`Invalid tariff code format: ${tariffCode}`);
+		}
+
 		const productCode = tariffParts.slice(2, -1).join("-");
 		const regionLetter = tariffParts[tariffParts.length - 1];
 
+		console.log(
+			`[${timestamp}] 🔍 Fetching product details for code: ${productCode}`
+		);
 		const productRes = await axios.get(
 			`${octopusConfig.baseURL}/products/${productCode}/`
 		);
+
+		if (!productRes.data.single_register_electricity_tariffs) {
+			throw new Error("No electricity tariffs found for product");
+		}
+
 		const tariffs = productRes.data.single_register_electricity_tariffs;
 		const regionTariff = tariffs[`_${regionLetter}`];
+
+		if (!regionTariff) {
+			throw new Error(`No tariff found for region ${regionLetter}`);
+		}
+
+		// Assume direct_debit_monthly for most users
 		const details = regionTariff.direct_debit_monthly;
+
+		if (!details) {
+			throw new Error("No direct debit monthly details found");
+		}
 
 		const tariffInfo = {
 			name: productRes.data.display_name,
 			unit_rate: (details.standard_unit_rate_inc_vat / 100).toFixed(4),
 			standing_charge: (details.standing_charge_inc_vat / 100).toFixed(2),
 		};
+
 		console.log(`[${timestamp}] ✅ Tariff information received:`, tariffInfo);
 		return tariffInfo;
 	} catch (error) {
@@ -244,22 +295,127 @@ async function getTariffInfo(apiKey, accountNumber, mpan) {
 		if (error.response) {
 			console.error(`[${timestamp}] Response data:`, error.response.data);
 			console.error(`[${timestamp}] Response status:`, error.response.status);
+			console.error(`[${timestamp}] Request URL:`, error.config?.url);
 		}
 		throw error;
+	}
+}
+
+// Get yesterday's usage
+async function getYesterdayUsage(apiKey, mpan, serialNumber, accountNumber) {
+	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
+	console.log(`[${timestamp}] 📅 Fetching yesterday's usage data...`);
+	try {
+		const yesterday = moment().subtract(1, "days").format("YYYY-MM-DD");
+		const url = `${octopusConfig.baseURL}/electricity-meter-points/${mpan}/meters/${serialNumber}/consumption/`;
+		console.log(`[${timestamp}] �� Requesting URL: ${url}`);
+
+		const response = await axios.get(url, {
+			headers: {
+				Authorization: `Basic ${Buffer.from(apiKey + ":").toString("base64")}`,
+			},
+			params: {
+				period_from: yesterday + "T00:00:00Z",
+				period_to: yesterday + "T23:59:59Z",
+				page_size: 48,
+			},
+		});
+
+		if (!response.data.results || response.data.results.length === 0) {
+			console.log(`[${timestamp}] ℹ️ No consumption data found for yesterday`);
+			return { usage: 0, cost: 0 };
+		}
+
+		const tariff = await getTariffInfo(apiKey, accountNumber, mpan);
+		const totalUsage = response.data.results.reduce(
+			(sum, reading) => sum + reading.consumption,
+			0
+		);
+		const totalCost = totalUsage * parseFloat(tariff.unit_rate);
+		console.log(
+			`[${timestamp}] ✅ Yesterday's usage data received: ${totalUsage.toFixed(
+				2
+			)} kWh, £${totalCost.toFixed(2)}`
+		);
+		return { usage: totalUsage, cost: totalCost };
+	} catch (error) {
+		console.error(
+			`[${timestamp}] ❌ Error fetching yesterday's usage:`,
+			error.message
+		);
+		if (error.response) {
+			console.error(`[${timestamp}] Response data:`, error.response.data);
+			console.error(`[${timestamp}] Response status:`, error.response.status);
+			console.error(`[${timestamp}] Request URL:`, error.config?.url);
+		}
+		return { usage: 0, cost: 0 };
+	}
+}
+
+// Get monthly usage
+async function getMonthlyUsage(apiKey, mpan, serialNumber, accountNumber) {
+	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
+	console.log(`[${timestamp}] 📊 Fetching monthly usage data...`);
+	try {
+		const thirtyDaysAgo = moment().subtract(30, "days").format("YYYY-MM-DD");
+		const url = `${octopusConfig.baseURL}/electricity-meter-points/${mpan}/meters/${serialNumber}/consumption/`;
+		console.log(`[${timestamp}] 🔍 Requesting URL: ${url}`);
+
+		const response = await axios.get(url, {
+			headers: {
+				Authorization: `Basic ${Buffer.from(apiKey + ":").toString("base64")}`,
+			},
+			params: {
+				period_from: thirtyDaysAgo + "T00:00:00Z",
+				period_to: moment().format("YYYY-MM-DD") + "T23:59:59Z",
+				page_size: 1000,
+			},
+		});
+
+		if (!response.data.results || response.data.results.length === 0) {
+			console.log(
+				`[${timestamp}] ℹ️ No consumption data found for last 30 days`
+			);
+			return { usage: 0, cost: 0 };
+		}
+
+		const tariff = await getTariffInfo(apiKey, accountNumber, mpan);
+		const totalUsage = response.data.results.reduce(
+			(sum, reading) => sum + reading.consumption,
+			0
+		);
+		const totalCost = totalUsage * parseFloat(tariff.unit_rate);
+		console.log(
+			`[${timestamp}] ✅ Monthly usage data received: ${totalUsage.toFixed(
+				2
+			)} kWh, £${totalCost.toFixed(2)}`
+		);
+		return { usage: totalUsage, cost: totalCost };
+	} catch (error) {
+		console.error(
+			`[${timestamp}] ❌ Error fetching monthly usage:`,
+			error.message
+		);
+		if (error.response) {
+			console.error(`[${timestamp}] Response data:`, error.response.data);
+			console.error(`[${timestamp}] Response status:`, error.response.status);
+			console.error(`[${timestamp}] Request URL:`, error.config?.url);
+		}
+		return { usage: 0, cost: 0 };
 	}
 }
 
 // API Endpoints
 app.post("/api/save-credentials", (req, res) => {
 	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	const { apiKey, mpan, accountNumber } = req.body;
+	const { apiKey, mpan, serialNumber, accountNumber } = req.body;
 	console.log(
 		`[${timestamp}] 💾 Saving credentials for account ${accountNumber}`
 	);
 
 	res.cookie(
 		"octopus_credentials",
-		JSON.stringify({ apiKey, mpan, accountNumber }),
+		JSON.stringify({ apiKey, mpan, serialNumber, accountNumber }),
 		{
 			maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
 			httpOnly: true,
@@ -294,18 +450,36 @@ app.get("/api/live-usage", async (req, res) => {
 			return res.status(401).json({ error: "No credentials found" });
 		}
 
-		const liveUsage = await getLiveUsage(
-			credentials.apiKey,
-			credentials.accountNumber
-		);
-		const tariff = await getTariffInfo(
-			credentials.apiKey,
-			credentials.accountNumber,
-			credentials.mpan
-		);
+		if (!credentials.serialNumber) {
+			console.log(`[${timestamp}] ❌ No serial number found in credentials`);
+			return res.status(400).json({ error: "Meter serial number is required" });
+		}
+
+		const [liveUsage, yesterday, monthly, tariff] = await Promise.all([
+			getLiveUsage(credentials.apiKey, credentials.accountNumber),
+			getYesterdayUsage(
+				credentials.apiKey,
+				credentials.mpan,
+				credentials.serialNumber,
+				credentials.accountNumber
+			),
+			getMonthlyUsage(
+				credentials.apiKey,
+				credentials.mpan,
+				credentials.serialNumber,
+				credentials.accountNumber
+			),
+			getTariffInfo(
+				credentials.apiKey,
+				credentials.accountNumber,
+				credentials.mpan
+			),
+		]);
 
 		const response = {
 			liveUsage,
+			yesterday,
+			monthly,
 			tariff,
 			timestamp: formatTimestamp(),
 		};
@@ -316,6 +490,10 @@ app.get("/api/live-usage", async (req, res) => {
 			`[${timestamp}] ❌ Error processing live usage request:`,
 			error.message
 		);
+		if (error.response) {
+			console.error(`[${timestamp}] Response data:`, error.response.data);
+			console.error(`[${timestamp}] Response status:`, error.response.status);
+		}
 		res.status(500).json({ error: error.message });
 	}
 });
