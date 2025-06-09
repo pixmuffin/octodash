@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html
+	lang="en"
+	data-theme="light">
+	<head>
+		<meta charset="UTF-8" />
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1.0" />
+		<title>Octopus Energy Dashboard</title>
+		<style>
+			:root {
+				--primary-color: #007bff;
+				--primary-hover: #0056b3;
+				--disabled-color: #cccccc;
+				--text-primary: #333333;
+				--text-secondary: #666666;
+				--background: #f5f5f5;
+				--card-bg: #ffffff;
+				--border-color: #dddddd;
+				--shadow-color: rgba(0, 0, 0, 0.1);
+			}
+
+			:root[data-theme="dark"] {
+				--primary-color: #0d6efd;
+				--primary-hover: #0a58ca;
+				--disabled-color: #4a4a4a;
+				--text-primary: #ffffff;
+				--text-secondary: #cccccc;
+				--background: #1a1a1a;
+				--card-bg: #2d2d2d;
+				--border-color: #404040;
+				--shadow-color: rgba(0, 0, 0, 0.3);
+			}
+
+			body {
+				font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+					Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+				margin: 0;
+				padding: 20px;
+				background-color: var(--background);
+				color: var(--text-primary);
+				transition: background-color 0.3s, color 0.3s;
+			}
+			.container {
+				max-width: 800px;
+				margin: 0 auto;
+				background-color: var(--card-bg);
+				padding: 20px;
+				border-radius: 10px;
+				box-shadow: var(--shadow-color);
+				transition: background-color 0.3s, box-shadow 0.3s;
+			}
+			.header {
+				display: flex;
+				justify-content: space-between;
+				align-items: center;
+				margin-bottom: 20px;
+			}
+			.theme-toggle {
+				background: none;
+				border: none;
+				cursor: pointer;
+				font-size: 1.5em;
+				padding: 5px;
+				color: var(--text-primary);
+				transition: transform 0.3s;
+			}
+			.theme-toggle:hover {
+				transform: scale(1.1);
+			}
+			.credentials-form {
+				margin-bottom: 20px;
+				padding: 20px;
+				background-color: var(--card-bg);
+				border-radius: 5px;
+				transition: background-color 0.3s;
+			}
+			.form-group {
+				margin-bottom: 15px;
+			}
+			label {
+				display: block;
+				margin-bottom: 5px;
+				font-weight: bold;
+			}
+			input[type="text"] {
+				width: 100%;
+				padding: 8px;
+				border: 1px solid var(--border-color);
+				border-radius: 4px;
+				box-sizing: border-box;
+				background-color: var(--card-bg);
+				color: var(--text-primary);
+				transition: background-color 0.3s, color 0.3s, border-color 0.3s;
+			}
+			.update-button {
+				background-color: var(--primary-color);
+				color: white;
+				border: none;
+				padding: 8px 16px;
+				border-radius: 4px;
+				cursor: pointer;
+				font-size: 14px;
+				font-weight: 600;
+				transition: all 0.3s ease;
+				box-shadow: 0 2px 4px var(--shadow-color);
+			}
+			.update-button:disabled {
+				background-color: var(--disabled-color);
+				cursor: not-allowed;
+				box-shadow: none;
+			}
+			.update-button:hover:not(:disabled) {
+				background-color: var(--primary-hover);
+				transform: translateY(-1px);
+				box-shadow: 0 4px 8px var(--shadow-color);
+			}
+			.update-button:active:not(:disabled) {
+				transform: translateY(0);
+				box-shadow: 0 2px 4px var(--shadow-color);
+			}
+			.dashboard {
+				background-color: var(--card-bg);
+				border-radius: 10px;
+				padding: 20px;
+				margin-top: 20px;
+				box-shadow: 0 2px 4px var(--shadow-color);
+			}
+			.controls {
+				display: flex;
+				align-items: center;
+				gap: 20px;
+				margin-bottom: 20px;
+				padding: 15px;
+				background-color: var(--card-bg);
+				border-radius: 8px;
+				box-shadow: 0 2px 4px var(--shadow-color);
+				border: 1px solid var(--border-color);
+			}
+			.auto-update {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+			}
+			.auto-update input[type="checkbox"] {
+				width: 18px;
+				height: 18px;
+				cursor: pointer;
+				accent-color: var(--primary-color);
+			}
+			.auto-update label {
+				color: var(--text-primary);
+				font-weight: 500;
+			}
+			.last-update {
+				color: var(--text-secondary);
+				font-size: 14px;
+				margin-left: auto;
+			}
+			.usage-card {
+				background-color: var(--card-bg);
+				border-radius: 5px;
+				padding: 20px;
+				margin-bottom: 20px;
+				box-shadow: var(--shadow-color);
+				transition: background-color 0.3s, box-shadow 0.3s;
+			}
+			.usage-value {
+				font-size: 2em;
+				font-weight: bold;
+				color: var(--primary-color);
+			}
+			.timestamp {
+				color: var(--text-secondary);
+				font-size: 0.9em;
+			}
+			.usage-stats {
+				display: grid;
+				grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+				gap: 20px;
+				margin-bottom: 20px;
+			}
+			.usage-cost {
+				color: var(--text-secondary);
+				font-size: 1.2em;
+				margin-top: 5px;
+			}
+			@media (max-width: 600px) {
+				.usage-stats {
+					grid-template-columns: 1fr;
+				}
+			}
+			.loading-container {
+				position: relative;
+				height: 6px;
+				background-color: var(--border-color);
+				border-radius: 3px;
+				overflow: hidden;
+				margin: 15px 0;
+				display: none;
+				box-shadow: inset 0 1px 2px var(--shadow-color);
+			}
+			.loading-container.active {
+				display: block;
+			}
+			.loading-bar {
+				position: absolute;
+				top: 0;
+				left: 0;
+				height: 100%;
+				width: 0;
+				background: linear-gradient(
+					90deg,
+					var(--primary-color),
+					var(--primary-hover)
+				);
+				transition: width 0.3s ease-out;
+				box-shadow: 0 0 8px var(--primary-color);
+			}
+			.loading-container.active .loading-bar {
+				width: 100%;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="container">
+			<div class="header">
+				<h1>Octopus Energy Dashboard</h1>
+				<button
+					id="themeToggle"
+					class="theme-toggle"
+					onclick="toggleTheme()"
+					title="Toggle dark/light mode">
+					🌓
+				</button>
+			</div>
+
+			<div
+				id="credentialsForm"
+				class="credentials-form">
+				<h2>Enter Your Credentials</h2>
+				<div class="form-group">
+					<label for="apiKey">API Key:</label>
+					<input
+						type="text"
+						id="apiKey"
+						placeholder="Enter your Octopus API key" />
+				</div>
+				<div class="form-group">
+					<label for="mpan">MPAN:</label>
+					<input
+						type="text"
+						id="mpan"
+						placeholder="Enter your MPAN" />
+				</div>
+				<div class="form-group">
+					<label for="serialNumber">Meter Serial Number:</label>
+					<input
+						type="text"
+						id="serialNumber"
+						placeholder="Enter your meter serial number" />
+				</div>
+				<div class="form-group">
+					<label for="accountNumber">Account Number:</label>
+					<input
+						type="text"
+						id="accountNumber"
+						placeholder="Enter your account number" />
+				</div>
+				<button onclick="saveCredentials()">Save Credentials</button>
+			</div>
+
+			<div
+				id="dashboard"
+				class="dashboard"
+				style="display: none">
+				<div class="controls">
+					<div class="auto-update">
+						<input
+							type="checkbox"
+							id="autoUpdate"
+							checked />
+						<label for="autoUpdate">Auto-update every 12 seconds</label>
+					</div>
+					<button
+						id="updateButton"
+						class="update-button"
+						onclick="updateDashboard()">
+						Update Now
+					</button>
+					<span
+						id="lastUpdate"
+						class="last-update"></span>
+				</div>
+				<div
+					id="loadingContainer"
+					class="loading-container">
+					<div
+						id="loadingBar"
+						class="loading-bar"></div>
+				</div>
+				<div class="usage-card">
+					<h2>Current Usage</h2>
+					<div
+						class="usage-value"
+						id="liveUsage">
+						-- W
+					</div>
+				</div>
+
+				<div class="usage-stats">
+					<div class="usage-card">
+						<h2>Yesterday's Usage</h2>
+						<div
+							class="usage-value"
+							id="yesterdayUsage">
+							-- kWh
+						</div>
+						<div
+							class="usage-cost"
+							id="yesterdayCost">
+							--
+						</div>
+					</div>
+
+					<div class="usage-card">
+						<h2>Last 30 Days</h2>
+						<div
+							class="usage-value"
+							id="monthlyUsage">
+							-- kWh
+						</div>
+						<div
+							class="usage-cost"
+							id="monthlyCost">
+							--
+						</div>
+					</div>
+				</div>
+
+				<div class="tariff-info">
+					<div class="tariff-card">
+						<h3>Tariff Information</h3>
+						<p><strong>Name:</strong> <span id="tariffName">--</span></p>
+						<p><strong>Unit Rate:</strong> <span id="unitRate">--</span></p>
+						<p>
+							<strong>Standing Charge:</strong>
+							<span id="standingCharge">--</span>
+						</p>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<script>
+			let updateInterval;
+			let lastUpdateTime = 0;
+			const UPDATE_COOLDOWN = 10000; // 10 seconds cooldown
+			const UPDATE_INTERVAL = 12000; // 12 seconds between updates
+
+			// Theme management
+			function setTheme(theme) {
+				document.documentElement.setAttribute("data-theme", theme);
+				document.cookie = `theme=${theme};max-age=${30 * 24 * 60 * 60};path=/`;
+			}
+
+			function toggleTheme() {
+				const currentTheme =
+					document.documentElement.getAttribute("data-theme");
+				const newTheme = currentTheme === "light" ? "dark" : "light";
+				setTheme(newTheme);
+			}
+
+			// Check for saved theme on page load
+			function initTheme() {
+				const savedTheme = document.cookie
+					.split("; ")
+					.find((row) => row.startsWith("theme="));
+				if (savedTheme) {
+					const theme = savedTheme.split("=")[1];
+					setTheme(theme);
+				}
+			}
+
+			// Check for saved credentials on page load
+			window.onload = async function () {
+				initTheme();
+				const response = await fetch("/api/credentials");
+				const credentials = await response.json();
+
+				if (credentials) {
+					document.getElementById("apiKey").value = credentials.apiKey;
+					document.getElementById("mpan").value = credentials.mpan;
+					document.getElementById("serialNumber").value =
+						credentials.serialNumber;
+					document.getElementById("accountNumber").value =
+						credentials.accountNumber;
+					document.getElementById("credentialsForm").style.display = "none";
+					document.getElementById("dashboard").style.display = "block";
+					startAutoUpdate();
+				}
+			};
+
+			async function saveCredentials() {
+				const apiKey = document.getElementById("apiKey").value;
+				const mpan = document.getElementById("mpan").value;
+				const serialNumber = document.getElementById("serialNumber").value;
+				const accountNumber = document.getElementById("accountNumber").value;
+
+				if (!apiKey || !mpan || !serialNumber || !accountNumber) {
+					alert("Please fill in all fields");
+					return;
+				}
+
+				try {
+					const response = await fetch("/api/save-credentials", {
+						method: "POST",
+						headers: {
+							"Content-Type": "application/json",
+						},
+						body: JSON.stringify({ apiKey, mpan, serialNumber, accountNumber }),
+					});
+
+					if (response.ok) {
+						startAutoUpdate();
+					} else {
+						alert("Error saving credentials");
+					}
+				} catch (error) {
+					console.error("Error:", error);
+					alert("Error saving credentials");
+				}
+			}
+
+			function showLoading() {
+				const container = document.getElementById("loadingContainer");
+				const bar = document.getElementById("loadingBar");
+
+				// Reset the bar
+				bar.style.width = "0%";
+				container.style.display = "block";
+
+				// Force a reflow
+				void container.offsetWidth;
+
+				// Add active class and set width
+				container.classList.add("active");
+				bar.style.width = "100%";
+			}
+
+			function hideLoading() {
+				const container = document.getElementById("loadingContainer");
+				const bar = document.getElementById("loadingBar");
+
+				// Reset the bar
+				bar.style.width = "0%";
+
+				// Remove active class and hide container
+				container.classList.remove("active");
+				container.style.display = "none";
+			}
+
+			function startAutoUpdate() {
+				if (updateInterval) {
+					clearInterval(updateInterval);
+				}
+				if (document.getElementById("autoUpdate").checked) {
+					// Initial update
+					updateDashboard();
+
+					// Set up interval for subsequent updates
+					updateInterval = setInterval(updateDashboard, UPDATE_INTERVAL);
+				}
+			}
+
+			function stopAutoUpdate() {
+				if (updateInterval) {
+					clearInterval(updateInterval);
+					updateInterval = null;
+				}
+				hideLoading();
+			}
+
+			// Add event listener for auto-update checkbox
+			document
+				.getElementById("autoUpdate")
+				.addEventListener("change", function (e) {
+					if (e.target.checked) {
+						startAutoUpdate();
+					} else {
+						stopAutoUpdate();
+					}
+				});
+
+			async function updateDashboard() {
+				const now = Date.now();
+				const timeSinceLastUpdate = now - lastUpdateTime;
+
+				if (timeSinceLastUpdate < UPDATE_COOLDOWN) {
+					const remainingTime = Math.ceil(
+						(UPDATE_COOLDOWN - timeSinceLastUpdate) / 1000
+					);
+					alert(`Please wait ${remainingTime} seconds before updating again.`);
+					return;
+				}
+
+				const updateButton = document.getElementById("updateButton");
+				updateButton.disabled = true;
+				showLoading();
+
+				try {
+					const response = await fetch("/api/live-usage");
+					const data = await response.json();
+
+					if (data.error) {
+						throw new Error(data.error);
+					}
+
+					// Update the current usage first
+					document.getElementById(
+						"liveUsage"
+					).textContent = `${data.liveUsage}W`;
+					hideLoading(); // Hide progress bar after current usage is updated
+
+					// Update the rest of the data
+					document.getElementById(
+						"yesterdayUsage"
+					).textContent = `${data.yesterday.usage.toFixed(2)} kWh`;
+					document.getElementById(
+						"yesterdayCost"
+					).textContent = `£${data.yesterday.cost.toFixed(2)}`;
+					document.getElementById(
+						"monthlyUsage"
+					).textContent = `${data.monthly.usage.toFixed(2)} kWh`;
+					document.getElementById(
+						"monthlyCost"
+					).textContent = `£${data.monthly.cost.toFixed(2)}`;
+					document.getElementById("tariffName").textContent = data.tariff.name;
+					document.getElementById(
+						"unitRate"
+					).textContent = `${data.tariff.unit_rate}p/kWh`;
+					document.getElementById(
+						"standingCharge"
+					).textContent = `£${data.tariff.standing_charge}/day`;
+					document.getElementById(
+						"lastUpdate"
+					).textContent = `Last updated: ${data.timestamp}`;
+
+					lastUpdateTime = now;
+				} catch (error) {
+					console.error("Error updating dashboard:", error);
+					alert("Error updating dashboard: " + error.message);
+					hideLoading();
+				} finally {
+					// Re-enable the update button after the cooldown period
+					setTimeout(() => {
+						updateButton.disabled = false;
+					}, UPDATE_COOLDOWN);
+				}
+			}
+		</script>
+	</body>
+</html>
