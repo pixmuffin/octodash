@@ -3,9 +3,34 @@ const axios = require("axios");
 const moment = require("moment");
 const path = require("path");
 const cookieParser = require("cookie-parser");
+const cookieEncryption = require("cookie-encryption");
+const crypto = require("crypto");
 
 const app = express();
 const port = process.env.PORT || 3000;
+
+// Generate a secure encryption key if not provided
+function generateSecureKey() {
+	return crypto.randomBytes(32).toString("hex");
+}
+
+// Get encryption key from environment or generate a new one
+const ENCRYPTION_KEY = process.env.COOKIE_ENCRYPTION_KEY || generateSecureKey();
+
+// Log the key status (but not the key itself)
+console.log(
+	`[${moment().format("YYYY-MM-DD HH:mm:ss")}] 🔐 Cookie encryption ${
+		process.env.COOKIE_ENCRYPTION_KEY
+			? "using provided key"
+			: "using auto-generated key"
+	}`
+);
+
+// Initialize cookie encryption
+const cookieEncryptor = new cookieEncryption({
+	key: ENCRYPTION_KEY,
+	algorithm: "aes-256-cbc",
+});
 
 // Custom logging middleware
 app.use((req, res, next) => {
@@ -36,6 +61,26 @@ const formatUsageData = (usage, cost) => {
 		cost: cost.toFixed(2),
 	};
 };
+
+// Helper function to encrypt cookie data
+function encryptCookie(data) {
+	try {
+		return cookieEncryptor.encrypt(JSON.stringify(data));
+	} catch (error) {
+		console.error("Error encrypting cookie:", error);
+		throw new Error("Failed to encrypt credentials");
+	}
+}
+
+// Helper function to decrypt cookie data
+function decryptCookie(encryptedData) {
+	try {
+		return JSON.parse(cookieEncryptor.decrypt(encryptedData));
+	} catch (error) {
+		console.error("Error decrypting cookie:", error);
+		return null;
+	}
+}
 
 // Get Kraken token for GraphQL API
 async function getKrakenToken(apiKey) {
@@ -308,7 +353,7 @@ async function getYesterdayUsage(apiKey, mpan, serialNumber, accountNumber) {
 	try {
 		const yesterday = moment().subtract(1, "days").format("YYYY-MM-DD");
 		const url = `${octopusConfig.baseURL}/electricity-meter-points/${mpan}/meters/${serialNumber}/consumption/`;
-		console.log(`[${timestamp}] �� Requesting URL: ${url}`);
+		console.log(`[${timestamp}] 🔍 Requesting URL: ${url}`);
 
 		const response = await axios.get(url, {
 			headers: {
@@ -413,14 +458,20 @@ app.post("/api/save-credentials", (req, res) => {
 		`[${timestamp}] 💾 Saving credentials for account ${accountNumber}`
 	);
 
-	res.cookie(
-		"octopus_credentials",
-		JSON.stringify({ apiKey, mpan, serialNumber, accountNumber }),
-		{
-			maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-			httpOnly: true,
-		}
-	);
+	// Encrypt the credentials before storing in cookie
+	const encryptedCredentials = encryptCookie({
+		apiKey,
+		mpan,
+		serialNumber,
+		accountNumber,
+	});
+
+	res.cookie("octopus_credentials", encryptedCredentials, {
+		maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+		httpOnly: true,
+		secure: process.env.NODE_ENV === "production", // Use secure cookies in production
+		sameSite: "strict",
+	});
 	console.log(`[${timestamp}] ✅ Credentials saved successfully`);
 	res.json({ success: true });
 });
@@ -429,10 +480,16 @@ app.get("/api/credentials", (req, res) => {
 	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
 	console.log(`[${timestamp}] 🔍 Checking for saved credentials`);
 
-	const credentials = req.cookies.octopus_credentials;
-	if (credentials) {
-		console.log(`[${timestamp}] ✅ Found saved credentials`);
-		res.json(JSON.parse(credentials));
+	const encryptedCredentials = req.cookies.octopus_credentials;
+	if (encryptedCredentials) {
+		const credentials = decryptCookie(encryptedCredentials);
+		if (credentials) {
+			console.log(`[${timestamp}] ✅ Found saved credentials`);
+			res.json(credentials);
+		} else {
+			console.log(`[${timestamp}] ❌ Failed to decrypt credentials`);
+			res.json(null);
+		}
 	} else {
 		console.log(`[${timestamp}] ℹ️ No saved credentials found`);
 		res.json(null);
@@ -444,10 +501,16 @@ app.get("/api/live-usage", async (req, res) => {
 	console.log(`[${timestamp}] 📊 Processing live usage request`);
 
 	try {
-		const credentials = JSON.parse(req.cookies.octopus_credentials);
-		if (!credentials) {
+		const encryptedCredentials = req.cookies.octopus_credentials;
+		if (!encryptedCredentials) {
 			console.log(`[${timestamp}] ❌ No credentials found in request`);
 			return res.status(401).json({ error: "No credentials found" });
+		}
+
+		const credentials = decryptCookie(encryptedCredentials);
+		if (!credentials) {
+			console.log(`[${timestamp}] ❌ Failed to decrypt credentials`);
+			return res.status(401).json({ error: "Invalid credentials" });
 		}
 
 		if (!credentials.serialNumber) {
