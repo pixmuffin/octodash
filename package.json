@@ -1,18 +1,21 @@
 {
-	"name": "Octodash",
+	"name": "octodash",
 	"version": "1.0.0",
 	"description": "A web dashboard for Octopus Energy usage",
 	"main": "web.js",
 	"scripts": {
-		"start": "node web.js"
+		"start": "node web.js",
+		"dev": "nodemon web.js",
+		"test": "echo \"Error: no test specified\" && exit 1"
 	},
 	"keywords": [
 		"octopus",
 		"energy",
-		"telegram",
-		"bot",
+		"dashboard",
 		"smart-meter",
-		"graphql"
+		"graphql",
+		"electricity",
+		"usage"
 	],
 	"author": "pixelpanic",
 	"license": "MIT",
@@ -21,5 +24,11 @@
 		"cookie-parser": "^1.4.6",
 		"express": "^4.18.2",
 		"moment": "^2.30.1"
+	},
+	"devDependencies": {
+		"nodemon": "^3.0.3"
+	},
+	"engines": {
+		"node": ">=18.0.0"
 	}
 }
