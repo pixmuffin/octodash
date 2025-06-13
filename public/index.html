@@ -1,604 +1,1016 @@
-const express = require("express");
-const axios = require("axios");
-const moment = require("moment");
-const path = require("path");
-const cookieParser = require("cookie-parser");
-const crypto = require("crypto");
-
-const app = express();
-const port = process.env.PORT || 3000;
-
-// Generate a secure encryption key if not provided
-function generateSecureKey() {
-	return crypto.randomBytes(32).toString("hex");
-}
-
-// Get encryption key from environment or generate a new one
-const ENCRYPTION_KEY = process.env.COOKIE_ENCRYPTION_KEY || generateSecureKey();
-
-// Log the key status (but not the key itself)
-console.log(
-	`[${moment().format("YYYY-MM-DD HH:mm:ss")}] 🔐 Cookie encryption ${
-		process.env.COOKIE_ENCRYPTION_KEY
-			? "using provided key"
-			: "using auto-generated key"
-	}`
-);
-
-// Custom encryption/decryption functions
-function encryptData(text) {
-	const algorithm = "aes-256-cbc";
-	const key = Buffer.from(ENCRYPTION_KEY, "hex");
-	const iv = crypto.randomBytes(16);
-
-	const cipher = crypto.createCipheriv(algorithm, key, iv);
-	let encrypted = cipher.update(text, "utf8", "hex");
-	encrypted += cipher.final("hex");
-
-	return iv.toString("hex") + ":" + encrypted;
-}
-
-function decryptData(encryptedText) {
-	try {
-		const algorithm = "aes-256-cbc";
-		const key = Buffer.from(ENCRYPTION_KEY, "hex");
-		const textParts = encryptedText.split(":");
-		const iv = Buffer.from(textParts.shift(), "hex");
-		const encrypted = textParts.join(":");
-
-		const decipher = crypto.createDecipheriv(algorithm, key, iv);
-		let decrypted = decipher.update(encrypted, "hex", "utf8");
-		decrypted += decipher.final("utf8");
-
-		return decrypted;
-	} catch (error) {
-		console.error("Error decrypting data:", error);
-		return null;
-	}
-}
-
-// Custom logging middleware
-app.use((req, res, next) => {
-	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	console.log(`[${timestamp}] ${req.method} ${req.url}`);
-	next();
-});
-
-// Middleware
-app.use(express.json());
-app.use(express.static("public"));
-app.use(cookieParser());
-
-// Octopus Energy API configuration
-const octopusConfig = {
-	baseURL: "https://api.octopus.energy/v1",
-};
-
-// Helper function to format timestamp
-const formatTimestamp = () => {
-	return moment().utc().format("YYYY-MM-DD HH:mm:ss UTC");
-};
-
-// Helper function to format usage data
-const formatUsageData = (usage, cost) => {
-	return {
-		usage: usage.toFixed(2),
-		cost: cost.toFixed(2),
-	};
-};
-
-// Helper function to encrypt cookie data
-function encryptCookie(data) {
-	try {
-		return encryptData(JSON.stringify(data));
-	} catch (error) {
-		console.error("Error encrypting cookie:", error);
-		throw new Error("Failed to encrypt credentials");
-	}
-}
-
-// Helper function to decrypt cookie data
-function decryptCookie(encryptedData) {
-	try {
-		const decryptedText = decryptData(encryptedData);
-		if (decryptedText) {
-			return JSON.parse(decryptedText);
-		}
-		return null;
-	} catch (error) {
-		console.error("Error decrypting cookie:", error);
-		return null;
-	}
-}
-
-// Get Kraken token for GraphQL API
-async function getKrakenToken(apiKey) {
-	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	console.log(`[${timestamp}] 🔑 Obtaining Kraken token...`);
-	try {
-		const response = await axios.post(
-			"https://api.octopus.energy/v1/graphql/",
-			{
-				query: `mutation {
-                    obtainKrakenToken(input: {APIKey:"${apiKey}"}) {
-                        token
-                        refreshToken
-                        refreshExpiresIn
-                    }
-                }`,
-			},
-			{
-				headers: {
-					"Content-Type": "application/json",
-				},
+<!DOCTYPE html>
+<html
+	lang="en"
+	data-theme="light">
+	<head>
+		<meta charset="UTF-8" />
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1.0" />
+		<title>Octopus Energy Dashboard</title>
+		<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+		<script src="https://cdn.jsdelivr.net/npm/moment@2.29.4/moment.min.js"></script>
+		<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-moment@1.0.1/dist/chartjs-adapter-moment.min.js"></script>
+		<style>
+			:root {
+				--primary-color: #007bff;
+				--primary-hover: #0056b3;
+				--disabled-color: #cccccc;
+				--text-primary: #333333;
+				--text-secondary: #666666;
+				--background: #f5f5f5;
+				--card-bg: #ffffff;
+				--border-color: #dddddd;
+				--shadow-color: rgba(0, 0, 0, 0.1);
+				--electricity-color: #007bff;
+				--gas-color: #ff6b35;
 			}
-		);
-		console.log(`[${timestamp}] ✅ Kraken token obtained successfully`);
-		return response.data.data.obtainKrakenToken.token;
-	} catch (error) {
-		console.error(
-			`[${timestamp}] ❌ Error obtaining Kraken token:`,
-			error.message
-		);
-		if (error.response) {
-			console.error(`[${timestamp}] Response data:`, error.response.data);
-			console.error(`[${timestamp}] Response status:`, error.response.status);
-		}
-		throw error;
-	}
-}
 
-// Get meter GUID
-async function getMeterGuid(token, accountNumber) {
-	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	console.log(
-		`[${timestamp}] 🔍 Looking up meter GUID for account ${accountNumber}...`
-	);
-	try {
-		const response = await axios.post(
-			"https://api.octopus.energy/v1/graphql/",
-			{
-				query: `query {
-                    account(accountNumber: "${accountNumber}") {
-                        electricityAgreements(active: true) {
-                            meterPoint {
-                                meters(includeInactive: false) {
-                                    smartDevices {
-                                        deviceId
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }`,
-			},
-			{
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `JWT ${token}`,
-				},
+			:root[data-theme="dark"] {
+				--primary-color: #0d6efd;
+				--primary-hover: #0a58ca;
+				--disabled-color: #4a4a4a;
+				--text-primary: #ffffff;
+				--text-secondary: #cccccc;
+				--background: #1a1a1a;
+				--card-bg: #2d2d2d;
+				--border-color: #404040;
+				--shadow-color: rgba(0, 0, 0, 0.3);
+				--electricity-color: #4dabf7;
+				--gas-color: #ffa8a8;
 			}
-		);
 
-		const agreements = response.data.data.account.electricityAgreements;
-		if (!agreements || agreements.length === 0) {
-			throw new Error("No active electricity agreements found");
-		}
-
-		const meters = agreements[0].meterPoint.meters;
-		if (!meters || meters.length === 0) {
-			throw new Error("No active meters found");
-		}
-
-		const smartDevices = meters[0].smartDevices;
-		if (!smartDevices || smartDevices.length === 0) {
-			throw new Error("No smart devices found");
-		}
-
-		console.log(
-			`[${timestamp}] ✅ Meter GUID found successfully: ${smartDevices[0].deviceId}`
-		);
-		return smartDevices[0].deviceId;
-	} catch (error) {
-		console.error(`[${timestamp}] ❌ Error getting meter GUID:`, error.message);
-		if (error.response) {
-			console.error(`[${timestamp}] Response data:`, error.response.data);
-			console.error(`[${timestamp}] Response status:`, error.response.status);
-		}
-		throw error;
-	}
-}
-
-// Get current live usage
-async function getLiveUsage(apiKey, accountNumber) {
-	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	console.log(`[${timestamp}] 📊 Fetching live usage data...`);
-	try {
-		const token = await getKrakenToken(apiKey);
-		const meterGuid = await getMeterGuid(token, accountNumber);
-
-		const response = await axios.post(
-			"https://api.octopus.energy/v1/graphql/",
-			{
-				query: `{
-                    smartMeterTelemetry(deviceId: "${meterGuid}") {
-                        readAt
-                        demand
-                        consumption
-                    }
-                }`,
-			},
-			{
-				headers: {
-					"Content-Type": "application/json",
-					Authorization: `JWT ${token}`,
-				},
+			body {
+				font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+					Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
+				margin: 0;
+				padding: 20px;
+				background-color: var(--background);
+				color: var(--text-primary);
+				transition: background-color 0.3s, color 0.3s;
 			}
-		);
-
-		if (
-			!response.data.data.smartMeterTelemetry ||
-			response.data.data.smartMeterTelemetry.length === 0
-		) {
-			throw new Error("No telemetry data available");
-		}
-
-		const telemetry = response.data.data.smartMeterTelemetry[0];
-		const usage = telemetry.demand === null ? 0 : Number(telemetry.demand);
-		console.log(`[${timestamp}] ✅ Live usage data received: ${usage}W`);
-		return usage;
-	} catch (error) {
-		console.error(
-			`[${timestamp}] ❌ Error fetching live usage:`,
-			error.message
-		);
-		if (error.response) {
-			console.error(`[${timestamp}] Response data:`, error.response.data);
-			console.error(`[${timestamp}] Response status:`, error.response.status);
-		}
-		return 0;
-	}
-}
-
-// Get tariff information
-async function getTariffInfo(apiKey, accountNumber, mpan) {
-	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	console.log(`[${timestamp}] 💰 Fetching tariff information...`);
-	try {
-		// First get the account info to find the current tariff code
-		const accountRes = await axios.get(
-			`${octopusConfig.baseURL}/accounts/${accountNumber}/`,
-			{
-				headers: {
-					Authorization: `Basic ${Buffer.from(apiKey + ":").toString(
-						"base64"
-					)}`,
-				},
+			.container {
+				max-width: 1000px;
+				margin: 0 auto;
+				background-color: var(--card-bg);
+				padding: 20px;
+				border-radius: 10px;
+				box-shadow: var(--shadow-color);
+				transition: background-color 0.3s, box-shadow 0.3s;
 			}
-		);
-
-		if (
-			!accountRes.data.properties ||
-			accountRes.data.properties.length === 0
-		) {
-			throw new Error("No properties found for account");
-		}
-
-		const properties = accountRes.data.properties;
-		const propertyWithMpan = properties.find((p) =>
-			p.electricity_meter_points.some((e) => e.mpan === mpan)
-		);
-
-		if (!propertyWithMpan) {
-			throw new Error(`MPAN ${mpan} not found in any property`);
-		}
-
-		const electricityPoints = propertyWithMpan.electricity_meter_points;
-		const mpanPoint = electricityPoints.find((e) => e.mpan === mpan);
-
-		if (
-			!mpanPoint ||
-			!mpanPoint.agreements ||
-			mpanPoint.agreements.length === 0
-		) {
-			throw new Error("No active agreements found for MPAN");
-		}
-
-		const currentAgreement = mpanPoint.agreements.reduce((latest, current) => {
-			if (!latest || new Date(current.valid_to) > new Date(latest.valid_to)) {
-				return current;
+			.header {
+				display: flex;
+				justify-content: space-between;
+				align-items: center;
+				margin-bottom: 20px;
 			}
-			return latest;
-		}, null);
+			.theme-toggle {
+				background: none;
+				border: none;
+				cursor: pointer;
+				font-size: 1.5em;
+				padding: 5px;
+				color: var(--text-primary);
+				transition: transform 0.3s;
+			}
+			.theme-toggle:hover {
+				transform: scale(1.1);
+			}
+			.credentials-form {
+				margin-bottom: 20px;
+				padding: 20px;
+				background-color: var(--card-bg);
+				border-radius: 5px;
+				transition: background-color 0.3s;
+			}
+			.form-section {
+				margin-bottom: 25px;
+				padding: 15px;
+				border: 1px solid var(--border-color);
+				border-radius: 5px;
+			}
+			.form-section h3 {
+				margin: 0 0 15px 0;
+				color: var(--text-primary);
+			}
+			.form-section.electricity h3 {
+				color: var(--electricity-color);
+			}
+			.form-section.gas h3 {
+				color: var(--gas-color);
+			}
+			.form-group {
+				margin-bottom: 15px;
+			}
+			label {
+				display: block;
+				margin-bottom: 5px;
+				font-weight: bold;
+			}
+			input[type="text"] {
+				width: 100%;
+				padding: 8px;
+				border: 1px solid var(--border-color);
+				border-radius: 4px;
+				box-sizing: border-box;
+				background-color: var(--card-bg);
+				color: var(--text-primary);
+				transition: background-color 0.3s, color 0.3s, border-color 0.3s;
+			}
+			.update-button {
+				background-color: var(--primary-color);
+				color: white;
+				border: none;
+				padding: 8px 16px;
+				border-radius: 4px;
+				cursor: pointer;
+				font-size: 14px;
+				font-weight: 600;
+				transition: all 0.3s ease;
+				box-shadow: 0 2px 4px var(--shadow-color);
+			}
+			.update-button:disabled {
+				background-color: var(--disabled-color);
+				cursor: not-allowed;
+				box-shadow: none;
+			}
+			.update-button:hover:not(:disabled) {
+				background-color: var(--primary-hover);
+				transform: translateY(-1px);
+				box-shadow: 0 4px 8px var(--shadow-color);
+			}
+			.update-button:active:not(:disabled) {
+				transform: translateY(0);
+				box-shadow: 0 2px 4px var(--shadow-color);
+			}
+			.dashboard {
+				background-color: var(--card-bg);
+				border-radius: 10px;
+				padding: 20px;
+				margin-top: 20px;
+				box-shadow: 0 2px 4px var(--shadow-color);
+			}
+			.controls {
+				display: flex;
+				align-items: center;
+				gap: 20px;
+				margin-bottom: 20px;
+				padding: 15px;
+				background-color: var(--card-bg);
+				border-radius: 8px;
+				box-shadow: 0 2px 4px var(--shadow-color);
+				border: 1px solid var(--border-color);
+			}
+			.auto-update {
+				display: flex;
+				align-items: center;
+				gap: 8px;
+			}
+			.auto-update input[type="checkbox"] {
+				width: 18px;
+				height: 18px;
+				cursor: pointer;
+				accent-color: var(--primary-color);
+			}
+			.auto-update label {
+				color: var(--text-primary);
+				font-weight: 500;
+			}
+			.last-update {
+				color: var(--text-secondary);
+				font-size: 14px;
+				margin-left: auto;
+			}
+			.fuel-section {
+				margin-bottom: 30px;
+			}
+			.fuel-title {
+				display: flex;
+				align-items: center;
+				gap: 10px;
+				margin-bottom: 20px;
+				font-size: 1.5em;
+				font-weight: bold;
+			}
+			.fuel-title.electricity {
+				color: var(--electricity-color);
+			}
+			.fuel-title.gas {
+				color: var(--gas-color);
+			}
+			.usage-card {
+				background-color: var(--card-bg);
+				border-radius: 5px;
+				padding: 20px;
+				margin-bottom: 20px;
+				box-shadow: var(--shadow-color);
+				transition: background-color 0.3s, box-shadow 0.3s;
+			}
+			.usage-card.electricity {
+				border-left: 4px solid var(--electricity-color);
+			}
+			.usage-card.gas {
+				border-left: 4px solid var(--gas-color);
+			}
+			.usage-value {
+				font-size: 2em;
+				font-weight: bold;
+				color: var(--primary-color);
+			}
+			.usage-value.electricity {
+				color: var(--electricity-color);
+			}
+			.usage-value.gas {
+				color: var(--gas-color);
+			}
+			.timestamp {
+				color: var(--text-secondary);
+				font-size: 0.9em;
+			}
+			.usage-stats {
+				display: grid;
+				grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+				gap: 20px;
+				margin-bottom: 20px;
+			}
+			.usage-cost {
+				color: var(--text-secondary);
+				font-size: 1.2em;
+				margin-top: 5px;
+			}
+			.tariff-info {
+				display: grid;
+				grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+				gap: 20px;
+				margin-top: 20px;
+			}
+			.tariff-card {
+				background-color: var(--card-bg);
+				border-radius: 5px;
+				padding: 15px;
+				box-shadow: var(--shadow-color);
+				transition: background-color 0.3s, box-shadow 0.3s;
+			}
+			.tariff-card.electricity {
+				border-left: 4px solid var(--electricity-color);
+			}
+			.tariff-card.gas {
+				border-left: 4px solid var(--gas-color);
+			}
+			@media (max-width: 600px) {
+				.usage-stats {
+					grid-template-columns: 1fr;
+				}
+				.tariff-info {
+					grid-template-columns: 1fr;
+				}
+			}
+			.loading-container {
+				position: relative;
+				height: 6px;
+				background-color: var(--border-color);
+				border-radius: 3px;
+				overflow: hidden;
+				margin: 15px 0;
+				display: none;
+				box-shadow: inset 0 1px 2px var(--shadow-color);
+			}
+			.loading-container.active {
+				display: block;
+			}
+			.loading-bar {
+				position: absolute;
+				top: 0;
+				left: 0;
+				height: 100%;
+				width: 0;
+				background: linear-gradient(
+					90deg,
+					var(--primary-color),
+					var(--primary-hover)
+				);
+				transition: width 0.3s ease-out;
+				box-shadow: 0 0 8px var(--primary-color);
+			}
+			.loading-container.active .loading-bar {
+				width: 100%;
+			}
+			.gas-optional {
+				background-color: var(--background);
+				padding: 10px;
+				border-radius: 5px;
+				margin-bottom: 10px;
+				font-size: 0.9em;
+				color: var(--text-secondary);
+			}
+			.graph-card {
+				background-color: var(--card-bg);
+				border-radius: 5px;
+				padding: 20px;
+				margin-bottom: 20px;
+				box-shadow: var(--shadow-color);
+				transition: background-color 0.3s, box-shadow 0.3s;
+				border-left: 4px solid var(--electricity-color);
+			}
+			.graph-container {
+				position: relative;
+				height: 300px;
+				width: 100%;
+			}
+			.no-data-message {
+				display: flex;
+				align-items: center;
+				justify-content: center;
+				height: 300px;
+				color: var(--text-secondary);
+				font-style: italic;
+			}
+		</style>
+	</head>
+	<body>
+		<div class="container">
+			<div class="header">
+				<h1>Octopus Energy Dashboard</h1>
+				<button
+					id="themeToggle"
+					class="theme-toggle"
+					onclick="toggleTheme()"
+					title="Toggle dark/light mode">
+					🌓
+				</button>
+			</div>
 
-		if (!currentAgreement) {
-			throw new Error("No valid agreement found");
-		}
+			<div
+				id="credentialsForm"
+				class="credentials-form">
+				<h2>Enter Your Credentials</h2>
 
-		const tariffCode = currentAgreement.tariff_code;
-		console.log(`[${timestamp}] 📝 Found tariff code: ${tariffCode}`);
+				<div class="form-section">
+					<div class="form-group">
+						<label for="apiKey">API Key:</label>
+						<input
+							type="text"
+							id="apiKey"
+							placeholder="Enter your Octopus API key" />
+					</div>
+					<div class="form-group">
+						<label for="accountNumber">Account Number:</label>
+						<input
+							type="text"
+							id="accountNumber"
+							placeholder="Enter your account number" />
+					</div>
+				</div>
 
-		// Parse product code and region letter from tariff code
-		// Format: E-1R-<PRODUCT>-<REGION>
-		const tariffParts = tariffCode.split("-");
-		if (tariffParts.length < 4) {
-			throw new Error(`Invalid tariff code format: ${tariffCode}`);
-		}
+				<div class="form-section electricity">
+					<h3>⚡ Electricity Meter Details</h3>
+					<div class="form-group">
+						<label for="mpan">MPAN:</label>
+						<input
+							type="text"
+							id="mpan"
+							placeholder="Enter your MPAN" />
+					</div>
+					<div class="form-group">
+						<label for="serialNumber">Electricity Meter Serial Number:</label>
+						<input
+							type="text"
+							id="serialNumber"
+							placeholder="Enter your electricity meter serial number" />
+					</div>
+				</div>
 
-		const productCode = tariffParts.slice(2, -1).join("-");
-		const regionLetter = tariffParts[tariffParts.length - 1];
+				<div class="form-section gas">
+					<h3>🔥 Gas Meter Details (Optional)</h3>
+					<div class="gas-optional">
+						If you have a gas meter with Octopus Energy, enter the details
+						below. Otherwise, leave these fields empty.
+					</div>
+					<div class="form-group">
+						<label for="mprn">MPRN:</label>
+						<input
+							type="text"
+							id="mprn"
+							placeholder="Enter your MPRN (optional)" />
+					</div>
+					<div class="form-group">
+						<label for="gasSerialNumber">Gas Meter Serial Number:</label>
+						<input
+							type="text"
+							id="gasSerialNumber"
+							placeholder="Enter your gas meter serial number (optional)" />
+					</div>
+				</div>
 
-		console.log(
-			`[${timestamp}] 🔍 Fetching product details for code: ${productCode}`
-		);
-		const productRes = await axios.get(
-			`${octopusConfig.baseURL}/products/${productCode}/`
-		);
+				<button onclick="saveCredentials()">Save Credentials</button>
+			</div>
 
-		if (!productRes.data.single_register_electricity_tariffs) {
-			throw new Error("No electricity tariffs found for product");
-		}
+			<div
+				id="dashboard"
+				class="dashboard"
+				style="display: none">
+				<div class="controls">
+					<div class="auto-update">
+						<input
+							type="checkbox"
+							id="autoUpdate"
+							checked />
+						<label for="autoUpdate">Auto-update every 12 seconds</label>
+					</div>
+					<button
+						id="updateButton"
+						class="update-button"
+						onclick="updateDashboard()">
+						Update Now
+					</button>
+					<span
+						id="lastUpdate"
+						class="last-update"></span>
+				</div>
+				<div
+					id="loadingContainer"
+					class="loading-container">
+					<div
+						id="loadingBar"
+						class="loading-bar"></div>
+				</div>
 
-		const tariffs = productRes.data.single_register_electricity_tariffs;
-		const regionTariff = tariffs[`_${regionLetter}`];
+				<!-- Electricity Section -->
+				<div class="fuel-section">
+					<div class="fuel-title electricity">⚡ Electricity</div>
 
-		if (!regionTariff) {
-			throw new Error(`No tariff found for region ${regionLetter}`);
-		}
+					<div class="usage-card electricity">
+						<h2>Current Usage</h2>
+						<div
+							class="usage-value electricity"
+							id="liveUsage">
+							-- W
+						</div>
+					</div>
 
-		// Assume direct_debit_monthly for most users
-		const details = regionTariff.direct_debit_monthly;
+					<div class="graph-card">
+						<h2>Last Hour Usage</h2>
+						<div class="graph-container">
+							<canvas id="usageChart"></canvas>
+							<div
+								id="noDataMessage"
+								class="no-data-message"
+								style="display: none">
+								📊 Start monitoring to see live usage graph...
+							</div>
+						</div>
+					</div>
 
-		if (!details) {
-			throw new Error("No direct debit monthly details found");
-		}
+					<div class="usage-stats">
+						<div class="usage-card electricity">
+							<h2>Yesterday's Usage</h2>
+							<div
+								class="usage-value electricity"
+								id="electricityYesterdayUsage">
+								-- kWh
+							</div>
+							<div
+								class="usage-cost"
+								id="electricityYesterdayCost">
+								--
+							</div>
+						</div>
 
-		const tariffInfo = {
-			name: productRes.data.display_name,
-			unit_rate: (details.standard_unit_rate_inc_vat / 100).toFixed(4),
-			standing_charge: (details.standing_charge_inc_vat / 100).toFixed(2),
-		};
+						<div class="usage-card electricity">
+							<h2>Last 30 Days</h2>
+							<div
+								class="usage-value electricity"
+								id="electricityMonthlyUsage">
+								-- kWh
+							</div>
+							<div
+								class="usage-cost"
+								id="electricityMonthlyCost">
+								--
+							</div>
+						</div>
+					</div>
+				</div>
 
-		console.log(`[${timestamp}] ✅ Tariff information received:`, tariffInfo);
-		return tariffInfo;
-	} catch (error) {
-		console.error(
-			`[${timestamp}] ❌ Error fetching tariff info:`,
-			error.message
-		);
-		if (error.response) {
-			console.error(`[${timestamp}] Response data:`, error.response.data);
-			console.error(`[${timestamp}] Response status:`, error.response.status);
-			console.error(`[${timestamp}] Request URL:`, error.config?.url);
-		}
-		throw error;
-	}
-}
+				<!-- Gas Section -->
+				<div
+					id="gasSection"
+					class="fuel-section"
+					style="display: none">
+					<div class="fuel-title gas">🔥 Gas</div>
 
-// Get yesterday's usage
-async function getYesterdayUsage(apiKey, mpan, serialNumber, accountNumber) {
-	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	console.log(`[${timestamp}] 📅 Fetching yesterday's usage data...`);
-	try {
-		const yesterday = moment().subtract(1, "days").format("YYYY-MM-DD");
-		const url = `${octopusConfig.baseURL}/electricity-meter-points/${mpan}/meters/${serialNumber}/consumption/`;
-		console.log(`[${timestamp}] 🔍 Requesting URL: ${url}`);
+					<div class="usage-stats">
+						<div class="usage-card gas">
+							<h2>Yesterday's Usage</h2>
+							<div
+								class="usage-value gas"
+								id="gasYesterdayUsage">
+								-- kWh
+							</div>
+							<div
+								class="usage-cost"
+								id="gasYesterdayCost">
+								--
+							</div>
+						</div>
 
-		const response = await axios.get(url, {
-			headers: {
-				Authorization: `Basic ${Buffer.from(apiKey + ":").toString("base64")}`,
-			},
-			params: {
-				period_from: yesterday + "T00:00:00Z",
-				period_to: yesterday + "T23:59:59Z",
-				page_size: 48,
-			},
-		});
+						<div class="usage-card gas">
+							<h2>Last 30 Days</h2>
+							<div
+								class="usage-value gas"
+								id="gasMonthlyUsage">
+								-- kWh
+							</div>
+							<div
+								class="usage-cost"
+								id="gasMonthlyCost">
+								--
+							</div>
+						</div>
+					</div>
+				</div>
 
-		if (!response.data.results || response.data.results.length === 0) {
-			console.log(`[${timestamp}] ℹ️ No consumption data found for yesterday`);
-			return { usage: 0, cost: 0 };
-		}
+				<!-- Tariff Information -->
+				<div class="tariff-info">
+					<div class="tariff-card electricity">
+						<h3>⚡ Electricity Tariff</h3>
+						<p>
+							<strong>Name:</strong> <span id="electricityTariffName">--</span>
+						</p>
+						<p>
+							<strong>Unit Rate:</strong>
+							<span id="electricityUnitRate">--</span>
+						</p>
+						<p>
+							<strong>Standing Charge:</strong>
+							<span id="electricityStandingCharge">--</span>
+						</p>
+					</div>
+					<div
+						id="gasTariffCard"
+						class="tariff-card gas"
+						style="display: none">
+						<h3>🔥 Gas Tariff</h3>
+						<p><strong>Name:</strong> <span id="gasTariffName">--</span></p>
+						<p><strong>Unit Rate:</strong> <span id="gasUnitRate">--</span></p>
+						<p>
+							<strong>Standing Charge:</strong>
+							<span id="gasStandingCharge">--</span>
+						</p>
+					</div>
+				</div>
+			</div>
+		</div>
 
-		const tariff = await getTariffInfo(apiKey, accountNumber, mpan);
-		const totalUsage = response.data.results.reduce(
-			(sum, reading) => sum + reading.consumption,
-			0
-		);
-		const totalCost = totalUsage * parseFloat(tariff.unit_rate);
-		console.log(
-			`[${timestamp}] ✅ Yesterday's usage data received: ${totalUsage.toFixed(
-				2
-			)} kWh, £${totalCost.toFixed(2)}`
-		);
-		return { usage: totalUsage, cost: totalCost };
-	} catch (error) {
-		console.error(
-			`[${timestamp}] ❌ Error fetching yesterday's usage:`,
-			error.message
-		);
-		if (error.response) {
-			console.error(`[${timestamp}] Response data:`, error.response.data);
-			console.error(`[${timestamp}] Response status:`, error.response.status);
-			console.error(`[${timestamp}] Request URL:`, error.config?.url);
-		}
-		return { usage: 0, cost: 0 };
-	}
-}
+		<script>
+			let updateInterval;
+			let lastUpdateTime = 0;
+			const UPDATE_COOLDOWN = 10000; // 10 seconds cooldown
+			const UPDATE_INTERVAL = 12000; // 12 seconds between updates
+			let usageChart = null;
 
-// Get monthly usage
-async function getMonthlyUsage(apiKey, mpan, serialNumber, accountNumber) {
-	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	console.log(`[${timestamp}] 📊 Fetching monthly usage data...`);
-	try {
-		const thirtyDaysAgo = moment().subtract(30, "days").format("YYYY-MM-DD");
-		const url = `${octopusConfig.baseURL}/electricity-meter-points/${mpan}/meters/${serialNumber}/consumption/`;
-		console.log(`[${timestamp}] 🔍 Requesting URL: ${url}`);
+			// Theme management
+			function setTheme(theme) {
+				document.documentElement.setAttribute("data-theme", theme);
+				document.cookie = `theme=${theme};max-age=${30 * 24 * 60 * 60};path=/`;
+			}
 
-		const response = await axios.get(url, {
-			headers: {
-				Authorization: `Basic ${Buffer.from(apiKey + ":").toString("base64")}`,
-			},
-			params: {
-				period_from: thirtyDaysAgo + "T00:00:00Z",
-				period_to: moment().format("YYYY-MM-DD") + "T23:59:59Z",
-				page_size: 1000,
-			},
-		});
+			function toggleTheme() {
+				const currentTheme =
+					document.documentElement.getAttribute("data-theme");
+				const newTheme = currentTheme === "light" ? "dark" : "light";
+				setTheme(newTheme);
+				updateChartTheme();
+			}
 
-		if (!response.data.results || response.data.results.length === 0) {
-			console.log(
-				`[${timestamp}] ℹ️ No consumption data found for last 30 days`
-			);
-			return { usage: 0, cost: 0 };
-		}
+			// Check for saved theme on page load
+			function initTheme() {
+				const savedTheme = document.cookie
+					.split("; ")
+					.find((row) => row.startsWith("theme="));
+				if (savedTheme) {
+					const theme = savedTheme.split("=")[1];
+					setTheme(theme);
+				}
+			}
 
-		const tariff = await getTariffInfo(apiKey, accountNumber, mpan);
-		const totalUsage = response.data.results.reduce(
-			(sum, reading) => sum + reading.consumption,
-			0
-		);
-		const totalCost = totalUsage * parseFloat(tariff.unit_rate);
-		console.log(
-			`[${timestamp}] ✅ Monthly usage data received: ${totalUsage.toFixed(
-				2
-			)} kWh, £${totalCost.toFixed(2)}`
-		);
-		return { usage: totalUsage, cost: totalCost };
-	} catch (error) {
-		console.error(
-			`[${timestamp}] ❌ Error fetching monthly usage:`,
-			error.message
-		);
-		if (error.response) {
-			console.error(`[${timestamp}] Response data:`, error.response.data);
-			console.error(`[${timestamp}] Response status:`, error.response.status);
-			console.error(`[${timestamp}] Request URL:`, error.config?.url);
-		}
-		return { usage: 0, cost: 0 };
-	}
-}
+			// Chart management
+			function initChart() {
+				const ctx = document.getElementById("usageChart").getContext("2d");
+				const isDarkTheme =
+					document.documentElement.getAttribute("data-theme") === "dark";
 
-// API Endpoints
-app.post("/api/save-credentials", (req, res) => {
-	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	const { apiKey, mpan, serialNumber, accountNumber } = req.body;
-	console.log(
-		`[${timestamp}] 💾 Saving credentials for account ${accountNumber}`
-	);
+				usageChart = new Chart(ctx, {
+					type: "line",
+					data: {
+						labels: [],
+						datasets: [
+							{
+								label: "Live Usage (W)",
+								data: [],
+								borderColor: isDarkTheme ? "#4dabf7" : "#007bff",
+								backgroundColor: isDarkTheme
+									? "rgba(77, 171, 247, 0.1)"
+									: "rgba(0, 123, 255, 0.1)",
+								borderWidth: 2,
+								fill: true,
+								tension: 0.4,
+								pointRadius: 2,
+								pointHoverRadius: 4,
+							},
+						],
+					},
+					options: {
+						responsive: true,
+						maintainAspectRatio: false,
+						plugins: {
+							legend: {
+								labels: {
+									color: isDarkTheme ? "#ffffff" : "#333333",
+								},
+							},
+							title: {
+								display: false,
+							},
+						},
+						scales: {
+							x: {
+								type: "time",
+								time: {
+									unit: "minute",
+									stepSize: 10,
+									displayFormats: {
+										minute: "HH:mm",
+									},
+								},
+								title: {
+									display: true,
+									text: "Time",
+									color: isDarkTheme ? "#cccccc" : "#666666",
+								},
+								ticks: {
+									color: isDarkTheme ? "#cccccc" : "#666666",
+								},
+								grid: {
+									color: isDarkTheme ? "#404040" : "#dddddd",
+								},
+							},
+							y: {
+								beginAtZero: true,
+								title: {
+									display: true,
+									text: "Usage (W)",
+									color: isDarkTheme ? "#cccccc" : "#666666",
+								},
+								ticks: {
+									color: isDarkTheme ? "#cccccc" : "#666666",
+								},
+								grid: {
+									color: isDarkTheme ? "#404040" : "#dddddd",
+								},
+							},
+						},
+						animation: {
+							duration: 750,
+						},
+					},
+				});
+			}
 
-	// Encrypt the credentials before storing in cookie
-	const encryptedCredentials = encryptCookie({
-		apiKey,
-		mpan,
-		serialNumber,
-		accountNumber,
-	});
+			function updateChart(historicalData) {
+				if (!usageChart) {
+					initChart();
+				}
 
-	res.cookie("octopus_credentials", encryptedCredentials, {
-		maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
-		httpOnly: true,
-		secure: process.env.NODE_ENV === "production", // Use secure cookies in production
-		sameSite: "strict",
-	});
-	console.log(`[${timestamp}] ✅ Credentials saved successfully`);
-	res.json({ success: true });
-});
+				if (!historicalData || historicalData.length === 0) {
+					document.getElementById("noDataMessage").style.display = "flex";
+					document.getElementById("usageChart").style.display = "none";
+					return;
+				}
 
-app.get("/api/credentials", (req, res) => {
-	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	console.log(`[${timestamp}] 🔍 Checking for saved credentials`);
+				document.getElementById("noDataMessage").style.display = "none";
+				document.getElementById("usageChart").style.display = "block";
 
-	const encryptedCredentials = req.cookies.octopus_credentials;
-	if (encryptedCredentials) {
-		const credentials = decryptCookie(encryptedCredentials);
-		if (credentials) {
-			console.log(`[${timestamp}] ✅ Found saved credentials`);
-			res.json(credentials);
-		} else {
-			console.log(`[${timestamp}] ❌ Failed to decrypt credentials`);
-			res.json(null);
-		}
-	} else {
-		console.log(`[${timestamp}] ℹ️ No saved credentials found`);
-		res.json(null);
-	}
-});
+				// Prepare data for the chart
+				const labels = historicalData.map((point) => new Date(point.timestamp));
+				const data = historicalData.map((point) => point.usage);
 
-app.get("/api/live-usage", async (req, res) => {
-	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	console.log(`[${timestamp}] 📊 Processing live usage request`);
+				usageChart.data.labels = labels;
+				usageChart.data.datasets[0].data = data;
+				usageChart.update("none"); // Update without animation for smoother updates
+			}
 
-	try {
-		const encryptedCredentials = req.cookies.octopus_credentials;
-		if (!encryptedCredentials) {
-			console.log(`[${timestamp}] ❌ No credentials found in request`);
-			return res.status(401).json({ error: "No credentials found" });
-		}
+			function updateChartTheme() {
+				if (!usageChart) return;
 
-		const credentials = decryptCookie(encryptedCredentials);
-		if (!credentials) {
-			console.log(`[${timestamp}] ❌ Failed to decrypt credentials`);
-			return res.status(401).json({ error: "Invalid credentials" });
-		}
+				const isDarkTheme =
+					document.documentElement.getAttribute("data-theme") === "dark";
 
-		if (!credentials.serialNumber) {
-			console.log(`[${timestamp}] ❌ No serial number found in credentials`);
-			return res.status(400).json({ error: "Meter serial number is required" });
-		}
+				// Update colors based on theme
+				usageChart.data.datasets[0].borderColor = isDarkTheme
+					? "#4dabf7"
+					: "#007bff";
+				usageChart.data.datasets[0].backgroundColor = isDarkTheme
+					? "rgba(77, 171, 247, 0.1)"
+					: "rgba(0, 123, 255, 0.1)";
 
-		const [liveUsage, yesterday, monthly, tariff] = await Promise.all([
-			getLiveUsage(credentials.apiKey, credentials.accountNumber),
-			getYesterdayUsage(
-				credentials.apiKey,
-				credentials.mpan,
-				credentials.serialNumber,
-				credentials.accountNumber
-			),
-			getMonthlyUsage(
-				credentials.apiKey,
-				credentials.mpan,
-				credentials.serialNumber,
-				credentials.accountNumber
-			),
-			getTariffInfo(
-				credentials.apiKey,
-				credentials.accountNumber,
-				credentials.mpan
-			),
-		]);
+				// Update text colors
+				usageChart.options.plugins.legend.labels.color = isDarkTheme
+					? "#ffffff"
+					: "#333333";
+				usageChart.options.scales.x.title.color = isDarkTheme
+					? "#cccccc"
+					: "#666666";
+				usageChart.options.scales.x.ticks.color = isDarkTheme
+					? "#cccccc"
+					: "#666666";
+				usageChart.options.scales.x.grid.color = isDarkTheme
+					? "#404040"
+					: "#dddddd";
+				usageChart.options.scales.y.title.color = isDarkTheme
+					? "#cccccc"
+					: "#666666";
+				usageChart.options.scales.y.ticks.color = isDarkTheme
+					? "#cccccc"
+					: "#666666";
+				usageChart.options.scales.y.grid.color = isDarkTheme
+					? "#404040"
+					: "#dddddd";
 
-		const response = {
-			liveUsage,
-			yesterday,
-			monthly,
-			tariff,
-			timestamp: formatTimestamp(),
-		};
-		console.log(`[${timestamp}] ✅ Sending response:`, response);
-		res.json(response);
-	} catch (error) {
-		console.error(
-			`[${timestamp}] ❌ Error processing live usage request:`,
-			error.message
-		);
-		if (error.response) {
-			console.error(`[${timestamp}] Response data:`, error.response.data);
-			console.error(`[${timestamp}] Response status:`, error.response.status);
-		}
-		res.status(500).json({ error: error.message });
-	}
-});
+				usageChart.update("none");
+			}
 
-// Serve the main page
-app.get("/", (req, res) => {
-	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	console.log(`[${timestamp}] 🌐 Serving main page`);
-	res.sendFile(path.join(__dirname, "public", "index.html"));
-});
+			// Check for saved credentials on page load
+			window.onload = async function () {
+				initTheme();
+				const response = await fetch("/api/credentials");
+				const credentials = await response.json();
 
-app.listen(port, () => {
-	const timestamp = moment().format("YYYY-MM-DD HH:mm:ss");
-	console.log(`[${timestamp}] 🚀 Server is running on port ${port}`);
-	console.log(`[${timestamp}] 📝 Verbose logging enabled`);
-});
+				if (credentials) {
+					document.getElementById("apiKey").value = credentials.apiKey;
+					document.getElementById("mpan").value = credentials.mpan;
+					document.getElementById("serialNumber").value =
+						credentials.serialNumber;
+					document.getElementById("accountNumber").value =
+						credentials.accountNumber;
+
+					// Set gas credentials if they exist
+					if (credentials.mprn) {
+						document.getElementById("mprn").value = credentials.mprn;
+					}
+					if (credentials.gasSerialNumber) {
+						document.getElementById("gasSerialNumber").value =
+							credentials.gasSerialNumber;
+					}
+
+					document.getElementById("credentialsForm").style.display = "none";
+					document.getElementById("dashboard").style.display = "block";
+
+					// Show gas section if gas credentials exist
+					if (credentials.mprn && credentials.gasSerialNumber) {
+						document.getElementById("gasSection").style.display = "block";
+						document.getElementById("gasTariffCard").style.display = "block";
+					}
+
+					// Initialize chart
+					initChart();
+
+					startAutoUpdate();
+				}
+			};
+
+			async function saveCredentials() {
+				const apiKey = document.getElementById("apiKey").value;
+				const mpan = document.getElementById("mpan").value;
+				const serialNumber = document.getElementById("serialNumber").value;
+				const accountNumber = document.getElementById("accountNumber").value;
+				const mprn = document.getElementById("mprn").value;
+				const gasSerialNumber =
+					document.getElementById("gasSerialNumber").value;
+
+				if (!apiKey || !mpan || !serialNumber || !accountNumber) {
+					alert(
+						"Please fill in all required fields (API Key, Account Number, MPAN, and Electricity Serial Number)"
+					);
+					return;
+				}
+
+				// Validate gas credentials - if one is provided, both should be provided
+				if ((mprn && !gasSerialNumber) || (!mprn && gasSerialNumber)) {
+					alert(
+						"If you want to include gas data, please provide both MPRN and Gas Serial Number, or leave both empty"
+					);
+					return;
+				}
+
+				try {
+					const response = await fetch("/api/save-credentials", {
+						method: "POST",
+						headers: {
+							"Content-Type": "application/json",
+						},
+						body: JSON.stringify({
+							apiKey,
+							mpan,
+							serialNumber,
+							accountNumber,
+							mprn: mprn || undefined,
+							gasSerialNumber: gasSerialNumber || undefined,
+						}),
+					});
+
+					if (!response.ok) {
+						throw new Error("Failed to save credentials");
+					}
+
+					// Hide credentials form and show dashboard
+					document.getElementById("credentialsForm").style.display = "none";
+					document.getElementById("dashboard").style.display = "block";
+
+					// Show gas section if gas credentials were provided
+					if (mprn && gasSerialNumber) {
+						document.getElementById("gasSection").style.display = "block";
+						document.getElementById("gasTariffCard").style.display = "block";
+					}
+
+					// Initialize chart
+					initChart();
+
+					// Start auto-update if checkbox is checked
+					if (document.getElementById("autoUpdate").checked) {
+						startAutoUpdate();
+					} else {
+						// If auto-update is not checked, still do an initial update
+						updateDashboard();
+					}
+				} catch (error) {
+					console.error("Error saving credentials:", error);
+					alert("Error saving credentials: " + error.message);
+				}
+			}
+
+			function showLoading() {
+				const container = document.getElementById("loadingContainer");
+				const bar = document.getElementById("loadingBar");
+
+				// Reset the bar
+				bar.style.width = "0%";
+				container.style.display = "block";
+
+				// Force a reflow
+				void container.offsetWidth;
+
+				// Add active class and set width
+				container.classList.add("active");
+				bar.style.width = "100%";
+			}
+
+			function hideLoading() {
+				const container = document.getElementById("loadingContainer");
+				const bar = document.getElementById("loadingBar");
+
+				// Reset the bar
+				bar.style.width = "0%";
+
+				// Remove active class and hide container
+				container.classList.remove("active");
+				container.style.display = "none";
+			}
+
+			function startAutoUpdate() {
+				if (updateInterval) {
+					clearInterval(updateInterval);
+				}
+				if (document.getElementById("autoUpdate").checked) {
+					// Initial update
+					updateDashboard();
+
+					// Set up interval for subsequent updates
+					updateInterval = setInterval(updateDashboard, UPDATE_INTERVAL);
+				}
+			}
+
+			function stopAutoUpdate() {
+				if (updateInterval) {
+					clearInterval(updateInterval);
+					updateInterval = null;
+				}
+				hideLoading();
+			}
+
+			// Add event listener for auto-update checkbox
+			document
+				.getElementById("autoUpdate")
+				.addEventListener("change", function (e) {
+					if (e.target.checked) {
+						startAutoUpdate();
+					} else {
+						stopAutoUpdate();
+					}
+				});
+
+			async function updateDashboard() {
+				const now = Date.now();
+				const timeSinceLastUpdate = now - lastUpdateTime;
+
+				if (timeSinceLastUpdate < UPDATE_COOLDOWN) {
+					const remainingTime = Math.ceil(
+						(UPDATE_COOLDOWN - timeSinceLastUpdate) / 1000
+					);
+					alert(`Please wait ${remainingTime} seconds before updating again.`);
+					return;
+				}
+
+				const updateButton = document.getElementById("updateButton");
+				updateButton.disabled = true;
+				showLoading();
+
+				try {
+					const response = await fetch("/api/live-usage");
+					const data = await response.json();
+
+					if (data.error) {
+						throw new Error(data.error);
+					}
+
+					// Update electricity data
+					document.getElementById(
+						"liveUsage"
+					).textContent = `${data.electricity.liveUsage}W`;
+					hideLoading(); // Hide progress bar after current usage is updated
+
+					// Update the chart with historical data
+					updateChart(data.electricity.historicalData);
+
+					document.getElementById(
+						"electricityYesterdayUsage"
+					).textContent = `${data.electricity.yesterday.usage.toFixed(2)} kWh`;
+					document.getElementById(
+						"electricityYesterdayCost"
+					).textContent = `£${data.electricity.yesterday.cost.toFixed(2)}`;
+					document.getElementById(
+						"electricityMonthlyUsage"
+					).textContent = `${data.electricity.monthly.usage.toFixed(2)} kWh`;
+					document.getElementById(
+						"electricityMonthlyCost"
+					).textContent = `£${data.electricity.monthly.cost.toFixed(2)}`;
+
+					// Update electricity tariff
+					document.getElementById("electricityTariffName").textContent =
+						data.electricity.tariff.name;
+					document.getElementById(
+						"electricityUnitRate"
+					).textContent = `${data.electricity.tariff.unit_rate}p/kWh`;
+					document.getElementById(
+						"electricityStandingCharge"
+					).textContent = `£${data.electricity.tariff.standing_charge}/day`;
+
+					// Update gas data if available
+					if (data.gas) {
+						document.getElementById(
+							"gasYesterdayUsage"
+						).textContent = `${data.gas.yesterday.usage.toFixed(2)} kWh`;
+						document.getElementById(
+							"gasYesterdayCost"
+						).textContent = `£${data.gas.yesterday.cost.toFixed(2)}`;
+						document.getElementById(
+							"gasMonthlyUsage"
+						).textContent = `${data.gas.monthly.usage.toFixed(2)} kWh`;
+						document.getElementById(
+							"gasMonthlyCost"
+						).textContent = `£${data.gas.monthly.cost.toFixed(2)}`;
+
+						// Update gas tariff
+						document.getElementById("gasTariffName").textContent =
+							data.gas.tariff.name;
+						document.getElementById(
+							"gasUnitRate"
+						).textContent = `${data.gas.tariff.unit_rate}p/kWh`;
+						document.getElementById(
+							"gasStandingCharge"
+						).textContent = `£${data.gas.tariff.standing_charge}/day`;
+
+						// Show gas sections
+						document.getElementById("gasSection").style.display = "block";
+						document.getElementById("gasTariffCard").style.display = "block";
+					}
+
+					document.getElementById(
+						"lastUpdate"
+					).textContent = `Last updated: ${data.timestamp}`;
+
+					lastUpdateTime = now;
+				} catch (error) {
+					console.error("Error updating dashboard:", error);
+					alert("Error updating dashboard: " + error.message);
+					hideLoading();
+				} finally {
+					// Re-enable the update button after the cooldown period
+					setTimeout(() => {
+						updateButton.disabled = false;
+					}, UPDATE_COOLDOWN);
+				}
+			}
+		</script>
+	</body>
+</html>

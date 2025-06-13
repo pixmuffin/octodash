@@ -22,6 +22,52 @@ const CONFIG = {
 const app = express();
 
 // =============================================================================
+// LIVE USAGE HISTORY STORAGE
+// =============================================================================
+
+const LiveUsageHistory = {
+	data: [], // Array to store { timestamp, usage, accountNumber }
+	maxAge: 60 * 60 * 1000, // 1 hour in milliseconds
+
+	add: function (accountNumber, usage) {
+		const now = new Date();
+		this.data.push({
+			timestamp: now.toISOString(),
+			usage: usage,
+			accountNumber: accountNumber,
+		});
+
+		// Clean old data (older than 1 hour)
+		this.cleanup();
+
+		Logger.log(
+			`Stored live usage data point: ${usage}W at ${now.toISOString()}`,
+			"📈"
+		);
+	},
+
+	cleanup: function () {
+		const cutoff = new Date(Date.now() - this.maxAge);
+		const originalLength = this.data.length;
+		this.data = this.data.filter((point) => new Date(point.timestamp) > cutoff);
+
+		if (this.data.length < originalLength) {
+			Logger.log(
+				`Cleaned ${originalLength - this.data.length} old data points`,
+				"🧹"
+			);
+		}
+	},
+
+	getForAccount: function (accountNumber) {
+		this.cleanup(); // Clean before returning
+		return this.data
+			.filter((point) => point.accountNumber === accountNumber)
+			.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+	},
+};
+
+// =============================================================================
 // LOGGING UTILITIES
 // =============================================================================
 
@@ -322,9 +368,11 @@ const OctopusAPI = {
 		accountNumber,
 		periodFrom,
 		periodTo,
-		logMessage
+		logMessage,
+		isMonthlyRequest = false
 	) => {
 		Logger.log(logMessage, "📅");
+		Logger.log(`Date range: ${periodFrom} to ${periodTo}`, "📅");
 
 		try {
 			const authHeader = OctopusAPI.createAuthHeader(apiKey);
@@ -335,12 +383,14 @@ const OctopusAPI = {
 				params: {
 					period_from: periodFrom,
 					period_to: periodTo,
-					page_size: periodFrom.includes("30") ? 1000 : 48,
+					page_size: isMonthlyRequest ? 1500 : 48,
 				},
 			});
 
 			if (!response.data.results?.length) {
-				Logger.info(`No consumption data found for specified period`);
+				Logger.info(
+					`No consumption data found for period ${periodFrom} to ${periodTo}`
+				);
 				return { usage: 0, cost: 0 };
 			}
 
@@ -356,13 +406,18 @@ const OctopusAPI = {
 			const totalCost = totalUsage * parseFloat(tariff.unit_rate);
 
 			Logger.success(
-				`Usage data received: ${totalUsage.toFixed(
+				`Usage data received for ${periodFrom} to ${periodTo}: ${totalUsage.toFixed(
 					2
-				)} kWh, £${totalCost.toFixed(2)}`
+				)} kWh, £${totalCost.toFixed(2)} (${
+					response.data.results.length
+				} readings)`
 			);
 			return { usage: totalUsage, cost: totalCost };
 		} catch (error) {
-			Logger.error(`Failed to fetch usage data`, error);
+			Logger.error(
+				`Failed to fetch usage data for ${periodFrom} to ${periodTo}`,
+				error
+			);
 			return { usage: 0, cost: 0 };
 		}
 	},
@@ -376,7 +431,8 @@ const OctopusAPI = {
 			accountNumber,
 			yesterday + "T00:00:00Z",
 			yesterday + "T23:59:59Z",
-			"Fetching yesterday's usage data..."
+			"Fetching yesterday's usage data...",
+			false
 		);
 	},
 
@@ -390,7 +446,180 @@ const OctopusAPI = {
 			accountNumber,
 			thirtyDaysAgo + "T00:00:00Z",
 			today + "T23:59:59Z",
-			"Fetching monthly usage data..."
+			"Fetching monthly usage data...",
+			true
+		);
+	},
+
+	// Gas-related methods
+	getGasTariffInfo: async (apiKey, accountNumber, mprn) => {
+		Logger.log("Fetching gas tariff information...", "🔥");
+
+		try {
+			const authHeader = OctopusAPI.createAuthHeader(apiKey);
+			const accountRes = await axios.get(
+				`${CONFIG.octopusBaseURL}/accounts/${accountNumber}/`,
+				{
+					headers: { Authorization: authHeader },
+				}
+			);
+
+			const properties = accountRes.data.properties;
+			if (!properties?.length)
+				throw new Error("No properties found for account");
+
+			const propertyWithMprn = properties.find((p) =>
+				p.gas_meter_points.some((g) => g.mprn === mprn)
+			);
+			if (!propertyWithMprn)
+				throw new Error(`MPRN ${mprn} not found in any property`);
+
+			const mprnPoint = propertyWithMprn.gas_meter_points.find(
+				(g) => g.mprn === mprn
+			);
+			if (!mprnPoint?.agreements?.length)
+				throw new Error("No active gas agreements found for MPRN");
+
+			const currentAgreement = mprnPoint.agreements.reduce(
+				(latest, current) => {
+					return !latest ||
+						new Date(current.valid_to) > new Date(latest.valid_to)
+						? current
+						: latest;
+				},
+				null
+			);
+
+			if (!currentAgreement) throw new Error("No valid gas agreement found");
+
+			const tariffCode = currentAgreement.tariff_code;
+			Logger.log(`Found gas tariff code: ${tariffCode}`, "📝");
+
+			const tariffParts = tariffCode.split("-");
+			if (tariffParts.length < 4)
+				throw new Error(`Invalid gas tariff code format: ${tariffCode}`);
+
+			const productCode = tariffParts.slice(2, -1).join("-");
+			const regionLetter = tariffParts[tariffParts.length - 1];
+
+			const productRes = await axios.get(
+				`${CONFIG.octopusBaseURL}/products/${productCode}/`
+			);
+			const tariffs = productRes.data.single_register_gas_tariffs;
+			if (!tariffs) throw new Error("No gas tariffs found for product");
+
+			const regionTariff = tariffs[`_${regionLetter}`];
+			if (!regionTariff?.direct_debit_monthly) {
+				throw new Error(`No gas tariff found for region ${regionLetter}`);
+			}
+
+			const details = regionTariff.direct_debit_monthly;
+			const tariffInfo = {
+				name: productRes.data.display_name,
+				unit_rate: (details.standard_unit_rate_inc_vat / 100).toFixed(4),
+				standing_charge: (details.standing_charge_inc_vat / 100).toFixed(2),
+			};
+
+			Logger.success("Gas tariff information received");
+			return tariffInfo;
+		} catch (error) {
+			Logger.error("Failed to fetch gas tariff info", error);
+			throw error;
+		}
+	},
+
+	getGasUsageData: async (
+		apiKey,
+		mprn,
+		gasSerialNumber,
+		accountNumber,
+		periodFrom,
+		periodTo,
+		logMessage,
+		isMonthlyRequest = false
+	) => {
+		Logger.log(logMessage, "🔥");
+		Logger.log(`Gas date range: ${periodFrom} to ${periodTo}`, "🔥");
+
+		try {
+			const authHeader = OctopusAPI.createAuthHeader(apiKey);
+			const url = `${CONFIG.octopusBaseURL}/gas-meter-points/${mprn}/meters/${gasSerialNumber}/consumption/`;
+
+			const response = await axios.get(url, {
+				headers: { Authorization: authHeader },
+				params: {
+					period_from: periodFrom,
+					period_to: periodTo,
+					page_size: isMonthlyRequest ? 1500 : 48,
+				},
+			});
+
+			if (!response.data.results?.length) {
+				Logger.info(
+					`No gas consumption data found for period ${periodFrom} to ${periodTo}`
+				);
+				return { usage: 0, cost: 0 };
+			}
+
+			const tariff = await OctopusAPI.getGasTariffInfo(
+				apiKey,
+				accountNumber,
+				mprn
+			);
+			const totalUsage = response.data.results.reduce(
+				(sum, reading) => sum + reading.consumption,
+				0
+			);
+			const totalCost = totalUsage * parseFloat(tariff.unit_rate);
+
+			Logger.success(
+				`Gas usage data received for ${periodFrom} to ${periodTo}: ${totalUsage.toFixed(
+					2
+				)} kWh, £${totalCost.toFixed(2)} (${
+					response.data.results.length
+				} readings)`
+			);
+			return { usage: totalUsage, cost: totalCost };
+		} catch (error) {
+			Logger.error(
+				`Failed to fetch gas usage data for ${periodFrom} to ${periodTo}`,
+				error
+			);
+			return { usage: 0, cost: 0 };
+		}
+	},
+
+	getGasYesterdayUsage: async (
+		apiKey,
+		mprn,
+		gasSerialNumber,
+		accountNumber
+	) => {
+		const yesterday = moment().subtract(1, "days").format("YYYY-MM-DD");
+		return OctopusAPI.getGasUsageData(
+			apiKey,
+			mprn,
+			gasSerialNumber,
+			accountNumber,
+			yesterday + "T00:00:00Z",
+			yesterday + "T23:59:59Z",
+			"Fetching yesterday's gas usage data...",
+			false
+		);
+	},
+
+	getGasMonthlyUsage: async (apiKey, mprn, gasSerialNumber, accountNumber) => {
+		const thirtyDaysAgo = moment().subtract(30, "days").format("YYYY-MM-DD");
+		const today = moment().format("YYYY-MM-DD");
+		return OctopusAPI.getGasUsageData(
+			apiKey,
+			mprn,
+			gasSerialNumber,
+			accountNumber,
+			thirtyDaysAgo + "T00:00:00Z",
+			today + "T23:59:59Z",
+			"Fetching monthly gas usage data...",
+			true
 		);
 	},
 };
@@ -415,7 +644,8 @@ app.use(cookieParser());
 
 const ApiRoutes = {
 	saveCredentials: async (req, res) => {
-		const { apiKey, mpan, serialNumber, accountNumber } = req.body;
+		const { apiKey, mpan, serialNumber, accountNumber, mprn, gasSerialNumber } =
+			req.body;
 		Logger.log(`Saving credentials for account ${accountNumber}`, "💾");
 
 		try {
@@ -424,6 +654,8 @@ const ApiRoutes = {
 				mpan,
 				serialNumber,
 				accountNumber,
+				mprn,
+				gasSerialNumber,
 			});
 
 			res.cookie("octopus_credentials", encryptedCredentials, {
@@ -477,13 +709,14 @@ const ApiRoutes = {
 			}
 
 			if (!credentials.serialNumber) {
-				Logger.error("No serial number found in credentials");
+				Logger.error("No electricity serial number found in credentials");
 				return res
 					.status(400)
-					.json({ error: "Meter serial number is required" });
+					.json({ error: "Electricity meter serial number is required" });
 			}
 
-			const [liveUsage, yesterday, monthly, tariff] = await Promise.all([
+			// Prepare electricity data promises
+			const electricityPromises = [
 				OctopusAPI.getLiveUsage(credentials.apiKey, credentials.accountNumber),
 				OctopusAPI.getYesterdayUsage(
 					credentials.apiKey,
@@ -502,17 +735,82 @@ const ApiRoutes = {
 					credentials.accountNumber,
 					credentials.mpan
 				),
+			];
+
+			// Prepare gas data promises (only if gas credentials are provided)
+			let gasPromises = [];
+			let hasGas = credentials.mprn && credentials.gasSerialNumber;
+
+			if (hasGas) {
+				Logger.log("Gas credentials found, fetching gas data", "🔥");
+				gasPromises = [
+					OctopusAPI.getGasYesterdayUsage(
+						credentials.apiKey,
+						credentials.mprn,
+						credentials.gasSerialNumber,
+						credentials.accountNumber
+					),
+					OctopusAPI.getGasMonthlyUsage(
+						credentials.apiKey,
+						credentials.mprn,
+						credentials.gasSerialNumber,
+						credentials.accountNumber
+					),
+					OctopusAPI.getGasTariffInfo(
+						credentials.apiKey,
+						credentials.accountNumber,
+						credentials.mprn
+					),
+				];
+			} else {
+				Logger.log("No gas credentials found, skipping gas data", "ℹ️");
+			}
+
+			// Execute all promises
+			const [electricityResults, gasResults] = await Promise.all([
+				Promise.all(electricityPromises),
+				hasGas ? Promise.all(gasPromises) : Promise.resolve([null, null, null]),
 			]);
 
-			const response = {
+			const [
 				liveUsage,
-				yesterday,
-				monthly,
-				tariff,
+				electricityYesterday,
+				electricityMonthly,
+				electricityTariff,
+			] = electricityResults;
+			const [gasYesterday, gasMonthly, gasTariff] = gasResults;
+
+			// Store live usage data point for historical graph
+			LiveUsageHistory.add(credentials.accountNumber, liveUsage);
+
+			// Get historical data for the graph
+			const historicalData = LiveUsageHistory.getForAccount(
+				credentials.accountNumber
+			);
+
+			const response = {
+				electricity: {
+					liveUsage,
+					yesterday: electricityYesterday,
+					monthly: electricityMonthly,
+					tariff: electricityTariff,
+					historicalData: historicalData,
+				},
+				gas: hasGas
+					? {
+							yesterday: gasYesterday,
+							monthly: gasMonthly,
+							tariff: gasTariff,
+					  }
+					: null,
 				timestamp: moment().utc().format("YYYY-MM-DD HH:mm:ss UTC"),
 			};
 
-			Logger.success("Sending live usage response");
+			Logger.success(
+				"Sending live usage response with electricity" +
+					(hasGas ? " and gas" : "") +
+					" data"
+			);
 			res.json(response);
 		} catch (error) {
 			Logger.error("Failed to process live usage request", error);
